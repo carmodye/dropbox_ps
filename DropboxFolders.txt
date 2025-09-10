@@ -1,0 +1,3 @@
+/Apps/rcbm_scan
+/Apps/rcbm_scan2
+/Apps/another_folder
