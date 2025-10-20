@@ -267,9 +267,17 @@ function Download-DropboxFile {
     }
 }
 
-# Function to list and download files from a Dropbox folder
 function List-AndDownload-DropboxFolder {
     param ($AccessToken, $FolderPath, $LocalBasePath)
+
+    $Headers = @{
+        "Authorization" = "Bearer $AccessToken"
+        "Content-Type"  = "application/json"
+    }
+
+    $ListUri = "https://api.dropboxapi.com/2/files/list_folder"
+    $DeleteUri = "https://api.dropboxapi.com/2/files/delete_v2"
+
     $Body = @{
         path                                = $FolderPath
         recursive                           = $true
@@ -278,52 +286,61 @@ function List-AndDownload-DropboxFolder {
         include_has_explicit_shared_members = $false
         include_mounted_folders             = $true
     } | ConvertTo-Json
-    $Headers = @{
-        "Authorization" = "Bearer $AccessToken"
-        "Content-Type"  = "application/json"
-    }
-    $Uri = "https://api.dropboxapi.com/2/files/list_folder"
 
     try {
         Write-Host "`nListing files in '$FolderPath'..."
-        $Response = Invoke-RestMethod -Uri $Uri -Method Post -Headers $Headers -Body $Body
+        $Response = Invoke-RestMethod -Uri $ListUri -Method Post -Headers $Headers -Body $Body
+
+        function DownloadAndDelete {
+            param ($DropboxPath, $LocalPath)
+
+            try {
+                Download-DropboxFile -AccessToken $AccessToken -DropboxPath $DropboxPath -LocalPath $LocalPath
+
+                if (Test-Path $LocalPath) {
+                    Write-Host "Downloaded: $DropboxPath → $LocalPath"
+                    $DeleteBody = @{ path = $DropboxPath } | ConvertTo-Json
+                    Invoke-RestMethod -Uri $DeleteUri -Method Post -Headers $Headers -Body $DeleteBody
+                    Write-Host "Deleted from Dropbox: $DropboxPath"
+                } else {
+                    Write-Warning "Download failed or file missing: $LocalPath"
+                }
+            } catch {
+                Write-Error "Error downloading or deleting '$DropboxPath': $($_.Exception.Message)"
+            }
+        }
+
         foreach ($Entry in $Response.entries) {
             if ($Entry.'.tag' -eq 'file') {
                 $DropboxPath = $Entry.path_display
                 $RelativePath = $DropboxPath.TrimStart('/')
                 $LocalPath = Join-Path $LocalBasePath $RelativePath
-                Download-DropboxFile -AccessToken $AccessToken -DropboxPath $DropboxPath -LocalPath $LocalPath
-            }
-            elseif ($Entry.'.tag' -eq 'folder') {
+                DownloadAndDelete -DropboxPath $DropboxPath -LocalPath $LocalPath
+            } elseif ($Entry.'.tag' -eq 'folder') {
                 Write-Host "Found folder: $($Entry.path_display)"
             }
         }
 
-        # Handle pagination
         while ($Response.has_more) {
-            $Body = @{
-                cursor = $Response.cursor
-            } | ConvertTo-Json
-            $Response = Invoke-RestMethod -Uri "https://api.dropboxapi.com/2/files/list_folder/continue" -Method Post -Headers $Headers -Body $Body
+            $Body = @{ cursor = $Response.cursor } | ConvertTo-Json
+            $Response = Invoke-RestMethod -Uri "$ListUri/continue" -Method Post -Headers $Headers -Body $Body
+
             foreach ($Entry in $Response.entries) {
                 if ($Entry.'.tag' -eq 'file') {
                     $DropboxPath = $Entry.path_display
                     $RelativePath = $DropboxPath.TrimStart('/')
                     $LocalPath = Join-Path $LocalBasePath $RelativePath
-                    Download-DropboxFile -AccessToken $AccessToken -DropboxPath $DropboxPath -LocalPath $LocalPath
-                }
-                elseif ($Entry.'.tag' -eq 'folder') {
+                    DownloadAndDelete -DropboxPath $DropboxPath -LocalPath $LocalPath
+                } elseif ($Entry.'.tag' -eq 'folder') {
                     Write-Host "Found folder: $($Entry.path_display)"
                 }
             }
         }
-    }
-    catch {
+    } catch {
         Write-Error "Failed to list folder '$FolderPath': $($_.Exception.Message)"
         if ($_.ErrorDetails.Message) {
             Write-Error "List folder error details: $($_.ErrorDetails.Message)"
-        }
-        elseif ($_.Exception.Response) {
+        } elseif ($_.Exception.Response) {
             $responseStream = $_.Exception.Response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
             Write-Error "List folder error details: $responseStream"
         }
